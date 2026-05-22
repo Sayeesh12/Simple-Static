@@ -16,15 +16,25 @@ jobs:
     runs-on: self-hosted
 
     steps:
+
+      # ------------------------------------------------------------
+      # Checkout repository
+      # ------------------------------------------------------------
+
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           ref: ${{ github.event.client_payload.commit_id || github.sha }}
 
+      # ------------------------------------------------------------
+      # Resolve deployment metadata
+      # ------------------------------------------------------------
+
       - name: Resolve deployment metadata
         id: meta
         shell: powershell
         run: |
+
           $deployId = "${{ github.event.client_payload.deployment_id }}"
 
           if ([string]::IsNullOrWhiteSpace($deployId)) {
@@ -40,33 +50,52 @@ jobs:
           "deployment_id=$deployId" >> $env:GITHUB_OUTPUT
           "callback_url=$callbackUrl" >> $env:GITHUB_OUTPUT
 
-          Write-Host "Resolved deployment_id=$deployId"
+          Write-Host "Deployment ID: $deployId"
+
+      # ------------------------------------------------------------
+      # Build Docker image
+      # ------------------------------------------------------------
 
       - name: Build Docker image
         shell: powershell
         run: |
-          docker build -t safe-deploy:${{ steps.meta.outputs.deployment_id }} .
+
+          docker build `
+            -t safe-deploy:${{ steps.meta.outputs.deployment_id }} `
+            .
 
           if ($LASTEXITCODE -ne 0) {
-            throw "Docker build failed"
+            throw "Docker image build failed"
           }
 
-          Write-Host "Docker image built successfully"
+          Write-Host "Docker image build successful"
 
-      - name: Stop and remove old deployment container
+      # ------------------------------------------------------------
+      # Stop/remove deployment container
+      # ------------------------------------------------------------
+
+      - name: Remove existing deployment container
         shell: powershell
         run: |
+
+          docker stop safe-deploy-app 2>$null
           docker rm -f safe-deploy-app 2>$null
 
-          Start-Sleep -Seconds 2
+          Start-Sleep -Seconds 3
 
-      - name: Free port 8080
+      # ------------------------------------------------------------
+      # Remove containers using port 8080
+      # ------------------------------------------------------------
+
+      - name: Remove containers using port 8080
         shell: powershell
         run: |
+
           $containers = docker ps -a -q --filter publish=8080
 
           foreach ($cid in $containers) {
-            Write-Host "Removing container using port 8080: $cid"
+
+            Write-Host "Removing container using 8080: $cid"
 
             docker stop $cid 2>$null
             docker rm -f $cid 2>$null
@@ -74,49 +103,113 @@ jobs:
 
           Start-Sleep -Seconds 3
 
-      - name: Remove exited containers
+      # ------------------------------------------------------------
+      # Kill Windows processes using port 8080
+      # ------------------------------------------------------------
+
+      - name: Kill Windows processes using port 8080
         shell: powershell
         run: |
+
+          $connections = Get-NetTCPConnection `
+            -LocalPort 8080 `
+            -ErrorAction SilentlyContinue
+
+          foreach ($conn in $connections) {
+
+            $pid = $conn.OwningProcess
+
+            if ($pid -and $pid -ne 0) {
+
+              Write-Host "Stopping PID using 8080: $pid"
+
+              try {
+                Stop-Process `
+                  -Id $pid `
+                  -Force `
+                  -ErrorAction SilentlyContinue
+              }
+              catch {
+                Write-Host "Could not stop PID $pid"
+              }
+            }
+          }
+
+          Start-Sleep -Seconds 5
+
+      # ------------------------------------------------------------
+      # Cleanup dangling/exited containers
+      # ------------------------------------------------------------
+
+      - name: Cleanup exited containers
+        shell: powershell
+        run: |
+
           docker container prune -f
+
+      # ------------------------------------------------------------
+      # Deploy new container
+      # ------------------------------------------------------------
 
       - name: Deploy new container
         shell: powershell
         run: |
+
           docker run -d `
             --name safe-deploy-app `
             -p 8080:80 `
             safe-deploy:${{ steps.meta.outputs.deployment_id }}
 
           if ($LASTEXITCODE -ne 0) {
+
+            Write-Host "Container deployment failed"
+
             docker ps -a
-            throw "Docker container deployment failed"
+
+            throw "Docker deployment failed"
           }
 
           Start-Sleep -Seconds 5
 
           docker ps --filter name=safe-deploy-app
 
+      # ------------------------------------------------------------
+      # Verify deployment
+      # ------------------------------------------------------------
+
       - name: Verify deployment
         shell: powershell
         run: |
-          try {
-              $response = Invoke-WebRequest `
-                -Uri "http://localhost:8080" `
-                -UseBasicParsing `
-                -TimeoutSec 15
 
-              Write-Host "Deployment verification successful"
-              Write-Host "HTTP Status: $($response.StatusCode)"
+          try {
+
+            $response = Invoke-WebRequest `
+              -Uri "http://localhost:8080" `
+              -UseBasicParsing `
+              -TimeoutSec 20
+
+            Write-Host "Deployment verification successful"
+            Write-Host "HTTP Status: $($response.StatusCode)"
           }
+
           catch {
-              docker logs safe-deploy-app
-              throw "Deployment verification failed"
+
+            Write-Host "Deployment verification failed"
+
+            docker logs safe-deploy-app
+
+            throw "Deployment verification failed"
           }
+
+      # ------------------------------------------------------------
+      # Notify backend success
+      # ------------------------------------------------------------
 
       - name: Notify backend success
         if: success() && steps.meta.outputs.callback_url != ''
         shell: powershell
         run: |
+
           $headers = @{
             "Content-Type" = "application/json"
             "Authorization" = "Bearer ${{ secrets.WORKFLOW_CALLBACK_SECRET }}"
@@ -125,10 +218,10 @@ jobs:
           $body = @{
             status = "DEPLOYED"
             logs = @(
-              "Checkout complete",
-              "Docker build succeeded",
-              "Container deployed successfully",
-              "Verification successful"
+              "Checkout completed",
+              "Docker image built",
+              "Container deployed",
+              "Deployment verified"
             )
             message = "Deployment completed successfully"
           } | ConvertTo-Json -Depth 3
@@ -139,36 +232,49 @@ jobs:
             -Headers $headers `
             -Body $body
 
+      # ------------------------------------------------------------
+      # Notify backend failure
+      # ------------------------------------------------------------
+
       - name: Notify backend failure
         if: failure() && steps.meta.outputs.callback_url != ''
         shell: powershell
         run: |
+
           try {
-              $headers = @{
-                "Content-Type" = "application/json"
-                "Authorization" = "Bearer ${{ secrets.WORKFLOW_CALLBACK_SECRET }}"
-              }
 
-              $body = @{
-                status = "FAILED"
-                logs = @(
-                  "GitHub Actions deployment failed"
-                )
-                message = "Deployment workflow failed"
-              } | ConvertTo-Json -Depth 3
+            $headers = @{
+              "Content-Type" = "application/json"
+              "Authorization" = "Bearer ${{ secrets.WORKFLOW_CALLBACK_SECRET }}"
+            }
 
-              Invoke-RestMethod `
-                -Uri "${{ steps.meta.outputs.callback_url }}" `
-                -Method POST `
-                -Headers $headers `
-                -Body $body
+            $body = @{
+              status = "FAILED"
+              logs = @(
+                "GitHub Actions deployment failed"
+              )
+              message = "Deployment workflow failed"
+            } | ConvertTo-Json -Depth 3
+
+            Invoke-RestMethod `
+              -Uri "${{ steps.meta.outputs.callback_url }}" `
+              -Method POST `
+              -Headers $headers `
+              -Body $body
           }
+
           catch {
-              Write-Host "Backend callback failed"
+
+            Write-Host "Backend callback failed"
           }
+
+      # ------------------------------------------------------------
+      # Final success message
+      # ------------------------------------------------------------
 
       - name: Print success
         if: success()
         shell: powershell
         run: |
-          Write-Host "Safe deploy completed successfully"
+
+          Write-Host "Safe deployment completed successfully"
