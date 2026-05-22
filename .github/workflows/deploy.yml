@@ -71,17 +71,28 @@ jobs:
           Write-Host "Docker image build successful"
 
       # ------------------------------------------------------------
-      # Stop/remove deployment container
+      # Remove existing deployment container
       # ------------------------------------------------------------
 
       - name: Remove existing deployment container
         shell: powershell
         run: |
 
-          docker stop safe-deploy-app 2>$null
-          docker rm -f safe-deploy-app 2>$null
+          docker stop safe-deploy-app *> $null
+
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "safe-deploy-app was not running"
+          }
+
+          docker rm -f safe-deploy-app *> $null
+
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "safe-deploy-app container did not exist"
+          }
 
           Start-Sleep -Seconds 3
+
+          Write-Host "Old deployment container cleanup complete"
 
       # ------------------------------------------------------------
       # Remove containers using port 8080
@@ -97,8 +108,8 @@ jobs:
 
             Write-Host "Removing container using 8080: $cid"
 
-            docker stop $cid 2>$null
-            docker rm -f $cid 2>$null
+            docker stop $cid *> $null
+            docker rm -f $cid *> $null
           }
 
           Start-Sleep -Seconds 3
@@ -107,8 +118,9 @@ jobs:
       # Kill Windows processes using port 8080
       # ------------------------------------------------------------
 
+      
       # ------------------------------------------------------------
-      # Cleanup dangling/exited containers
+      # Cleanup exited containers
       # ------------------------------------------------------------
 
       - name: Cleanup exited containers
@@ -160,8 +172,8 @@ jobs:
 
             Write-Host "Deployment verification successful"
             Write-Host "HTTP Status: $($response.StatusCode)"
-          }
 
+          }
           catch {
 
             Write-Host "Deployment verification failed"
@@ -231,8 +243,8 @@ jobs:
               -Method POST `
               -Headers $headers `
               -Body $body
-          }
 
+          }
           catch {
 
             Write-Host "Backend callback failed"
