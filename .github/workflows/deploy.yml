@@ -37,8 +37,8 @@ jobs:
 
           $callbackUrl = "${{ github.event.client_payload.callback_url }}"
 
-          echo "deployment_id=$deployId" >> $env:GITHUB_OUTPUT
-          echo "callback_url=$callbackUrl" >> $env:GITHUB_OUTPUT
+          "deployment_id=$deployId" >> $env:GITHUB_OUTPUT
+          "callback_url=$callbackUrl" >> $env:GITHUB_OUTPUT
 
           Write-Host "Resolved deployment_id=$deployId"
 
@@ -51,7 +51,7 @@ jobs:
             throw "Docker build failed"
           }
 
-          Write-Host "Built image safe-deploy:${{ steps.meta.outputs.deployment_id }}"
+          Write-Host "Docker image built successfully"
 
       - name: Stop old container
         shell: powershell
@@ -77,7 +77,11 @@ jobs:
             -p 8080:80 `
             safe-deploy:${{ steps.meta.outputs.deployment_id }}
 
-          Start-Sleep -Seconds 3
+          if ($LASTEXITCODE -ne 0) {
+            throw "Docker container deployment failed"
+          }
+
+          Start-Sleep -Seconds 5
 
           docker ps --filter name=safe-deploy-app
 
@@ -85,14 +89,14 @@ jobs:
         shell: powershell
         run: |
           try {
-            Invoke-WebRequest http://localhost:8080 -UseBasicParsing
-            Write-Host "Deployment successful — http://localhost:8080"
+              Invoke-WebRequest -Uri "http://localhost:8080" -UseBasicParsing
+              Write-Host "Deployment verification successful"
           }
           catch {
-            throw "Deployment verification failed"
+              throw "Deployment verification failed"
           }
 
-      - name: Notify backend — success
+      - name: Notify backend success
         if: success() && steps.meta.outputs.callback_url != ''
         shell: powershell
         run: |
@@ -106,9 +110,9 @@ jobs:
             logs = @(
               "Checkout complete",
               "Docker build succeeded",
-              "Container safe-deploy-app started on :8080"
+              "Container deployed successfully"
             )
-            message = "Deployed via GitHub Actions self-hosted runner"
+            message = "Deployment completed successfully"
           } | ConvertTo-Json -Depth 3
 
           Invoke-RestMethod `
@@ -117,36 +121,36 @@ jobs:
             -Headers $headers `
             -Body $body
 
-      - name: Notify backend — failure
+      - name: Notify backend failure
         if: failure() && steps.meta.outputs.callback_url != ''
         shell: powershell
         run: |
           try {
-            $headers = @{
-              "Content-Type" = "application/json"
-              "Authorization" = "Bearer ${{ secrets.WORKFLOW_CALLBACK_SECRET }}"
-            }
+              $headers = @{
+                "Content-Type" = "application/json"
+                "Authorization" = "Bearer ${{ secrets.WORKFLOW_CALLBACK_SECRET }}"
+              }
 
-            $body = @{
-              status = "FAILED"
-              logs = @(
-                "GitHub Actions deploy job failed"
-              )
-              message = "See workflow logs for details"
-            } | ConvertTo-Json -Depth 3
+              $body = @{
+                status = "FAILED"
+                logs = @(
+                  "GitHub Actions deployment failed"
+                )
+                message = "Deployment workflow failed"
+              } | ConvertTo-Json -Depth 3
 
-            Invoke-RestMethod `
-              -Uri "${{ steps.meta.outputs.callback_url }}" `
-              -Method POST `
-              -Headers $headers `
-              -Body $body
+              Invoke-RestMethod `
+                -Uri "${{ steps.meta.outputs.callback_url }}" `
+                -Method POST `
+                -Headers $headers `
+                -Body $body
           }
           catch {
-            Write-Host "Backend failure callback failed"
+              Write-Host "Backend callback failed"
           }
 
       - name: Print success
         if: success()
         shell: powershell
         run: |
-          Write-Host "Safe deploy completed for deployment ${{ steps.meta.outputs.deployment_id }}"
+          Write-Host "Safe deploy completed successfully"
