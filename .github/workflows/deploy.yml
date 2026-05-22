@@ -107,36 +107,6 @@ jobs:
       # Kill Windows processes using port 8080
       # ------------------------------------------------------------
 
-      - name: Kill Windows processes using port 8080
-        shell: powershell
-        run: |
-
-          $connections = Get-NetTCPConnection `
-            -LocalPort 8080 `
-            -ErrorAction SilentlyContinue
-
-          foreach ($conn in $connections) {
-
-            $pid = $conn.OwningProcess
-
-            if ($pid -and $pid -ne 0) {
-
-              Write-Host "Stopping PID using 8080: $pid"
-
-              try {
-                Stop-Process `
-                  -Id $pid `
-                  -Force `
-                  -ErrorAction SilentlyContinue
-              }
-              catch {
-                Write-Host "Could not stop PID $pid"
-              }
-            }
-          }
-
-          Start-Sleep -Seconds 5
-
       # ------------------------------------------------------------
       # Cleanup dangling/exited containers
       # ------------------------------------------------------------
