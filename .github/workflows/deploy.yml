@@ -1,12 +1,9 @@
-# Standalone static website repository workflow
-# Use this file when your repo root contains: Dockerfile, index.html, styles.css, app.js
-# Requires a self-hosted runner with Docker installed on the same machine.
-
 name: Risk-Aware Safe Deploy
 
 on:
   repository_dispatch:
     types: [safe_deploy]
+
   workflow_dispatch:
     inputs:
       deployment_id:
@@ -26,57 +23,130 @@ jobs:
 
       - name: Resolve deployment metadata
         id: meta
+        shell: powershell
         run: |
-          echo "deployment_id=${{ github.event.client_payload.deployment_id || github.event.inputs.deployment_id || 'manual' }}" >> $GITHUB_OUTPUT
-          echo "callback_url=${{ github.event.client_payload.callback_url }}" >> $GITHUB_OUTPUT
+          $deployId = "${{ github.event.client_payload.deployment_id }}"
+
+          if ([string]::IsNullOrWhiteSpace($deployId)) {
+            $deployId = "${{ github.event.inputs.deployment_id }}"
+          }
+
+          if ([string]::IsNullOrWhiteSpace($deployId)) {
+            $deployId = "manual"
+          }
+
+          $callbackUrl = "${{ github.event.client_payload.callback_url }}"
+
+          echo "deployment_id=$deployId" >> $env:GITHUB_OUTPUT
+          echo "callback_url=$callbackUrl" >> $env:GITHUB_OUTPUT
+
+          Write-Host "Resolved deployment_id=$deployId"
 
       - name: Build Docker image
+        shell: powershell
         run: |
           docker build -t safe-deploy:${{ steps.meta.outputs.deployment_id }} .
-          echo "Built image safe-deploy:${{ steps.meta.outputs.deployment_id }}"
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Docker build failed"
+          }
+
+          Write-Host "Built image safe-deploy:${{ steps.meta.outputs.deployment_id }}"
 
       - name: Stop old container
+        shell: powershell
         run: |
-          docker stop safe-deploy-app 2>/dev/null || true
-          docker rm -f safe-deploy-app 2>/dev/null || true
+          docker stop safe-deploy-app 2>$null
+          docker rm -f safe-deploy-app 2>$null
 
       - name: Remove containers using port 8080
+        shell: powershell
         run: |
-          for cid in $(docker ps -q --filter publish=8080); do
-            docker stop "$cid" || true
-            docker rm -f "$cid" || true
-          done
+          $containers = docker ps -q --filter publish=8080
+
+          foreach ($cid in $containers) {
+            docker stop $cid
+            docker rm -f $cid
+          }
 
       - name: Deploy new container
+        shell: powershell
         run: |
-          docker run -d \
-            --name safe-deploy-app \
-            -p 8080:80 \
+          docker run -d `
+            --name safe-deploy-app `
+            -p 8080:80 `
             safe-deploy:${{ steps.meta.outputs.deployment_id }}
-          sleep 2
+
+          Start-Sleep -Seconds 3
+
           docker ps --filter name=safe-deploy-app
 
       - name: Verify deployment
+        shell: powershell
         run: |
-          curl -f http://localhost:8080 || exit 1
-          echo "Deployment successful — http://localhost:8080"
+          try {
+            Invoke-WebRequest http://localhost:8080 -UseBasicParsing
+            Write-Host "Deployment successful — http://localhost:8080"
+          }
+          catch {
+            throw "Deployment verification failed"
+          }
 
       - name: Notify backend — success
         if: success() && steps.meta.outputs.callback_url != ''
+        shell: powershell
         run: |
-          curl -sf -X POST "${{ steps.meta.outputs.callback_url }}" \
-            -H "Content-Type: application/json" \
-            -H "Authorization: Bearer ${{ secrets.WORKFLOW_CALLBACK_SECRET }}" \
-            -d "{\"status\":\"DEPLOYED\",\"logs\":[\"Checkout complete\",\"Docker build succeeded\",\"Container safe-deploy-app started on :8080\"],\"message\":\"Deployed via GitHub Actions self-hosted runner\"}"
+          $headers = @{
+            "Content-Type" = "application/json"
+            "Authorization" = "Bearer ${{ secrets.WORKFLOW_CALLBACK_SECRET }}"
+          }
+
+          $body = @{
+            status = "DEPLOYED"
+            logs = @(
+              "Checkout complete",
+              "Docker build succeeded",
+              "Container safe-deploy-app started on :8080"
+            )
+            message = "Deployed via GitHub Actions self-hosted runner"
+          } | ConvertTo-Json -Depth 3
+
+          Invoke-RestMethod `
+            -Uri "${{ steps.meta.outputs.callback_url }}" `
+            -Method POST `
+            -Headers $headers `
+            -Body $body
 
       - name: Notify backend — failure
         if: failure() && steps.meta.outputs.callback_url != ''
+        shell: powershell
         run: |
-          curl -sf -X POST "${{ steps.meta.outputs.callback_url }}" \
-            -H "Content-Type: application/json" \
-            -H "Authorization: Bearer ${{ secrets.WORKFLOW_CALLBACK_SECRET }}" \
-            -d "{\"status\":\"FAILED\",\"logs\":[\"GitHub Actions deploy job failed\"],\"message\":\"See workflow logs for details\"}" || true
+          try {
+            $headers = @{
+              "Content-Type" = "application/json"
+              "Authorization" = "Bearer ${{ secrets.WORKFLOW_CALLBACK_SECRET }}"
+            }
+
+            $body = @{
+              status = "FAILED"
+              logs = @(
+                "GitHub Actions deploy job failed"
+              )
+              message = "See workflow logs for details"
+            } | ConvertTo-Json -Depth 3
+
+            Invoke-RestMethod `
+              -Uri "${{ steps.meta.outputs.callback_url }}" `
+              -Method POST `
+              -Headers $headers `
+              -Body $body
+          }
+          catch {
+            Write-Host "Backend failure callback failed"
+          }
 
       - name: Print success
         if: success()
-        run: echo "::notice::Safe deploy completed for deployment ${{ steps.meta.outputs.deployment_id }}"
+        shell: powershell
+        run: |
+          Write-Host "Safe deploy completed for deployment ${{ steps.meta.outputs.deployment_id }}"
