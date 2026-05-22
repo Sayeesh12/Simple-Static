@@ -2,7 +2,8 @@ name: Risk-Aware Safe Deploy
 
 on:
   repository_dispatch:
-    types: [safe_deploy]
+    types:
+      - safe_deploy
 
   workflow_dispatch:
     inputs:
@@ -71,28 +72,42 @@ jobs:
           Write-Host "Docker image build successful"
 
       # ------------------------------------------------------------
-      # Remove existing deployment container
+      # Remove existing deployment container safely
       # ------------------------------------------------------------
 
       - name: Remove existing deployment container
         shell: powershell
         run: |
 
-          docker stop safe-deploy-app *> $null
+          $existingContainer = docker ps -a `
+            --filter "name=safe-deploy-app" `
+            --format "{{.Names}}"
 
-          if ($LASTEXITCODE -ne 0) {
-            Write-Host "safe-deploy-app was not running"
+          if ($existingContainer -eq "safe-deploy-app") {
+
+            Write-Host "Stopping existing container..."
+
+            try {
+              docker stop safe-deploy-app
+            }
+            catch {
+              Write-Host "Could not stop safe-deploy-app"
+            }
+
+            try {
+              docker rm -f safe-deploy-app
+            }
+            catch {
+              Write-Host "Could not remove safe-deploy-app"
+            }
+
           }
+          else {
 
-          docker rm -f safe-deploy-app *> $null
-
-          if ($LASTEXITCODE -ne 0) {
-            Write-Host "safe-deploy-app container did not exist"
+            Write-Host "safe-deploy-app container does not exist"
           }
 
           Start-Sleep -Seconds 3
-
-          Write-Host "Old deployment container cleanup complete"
 
       # ------------------------------------------------------------
       # Remove containers using port 8080
@@ -104,12 +119,31 @@ jobs:
 
           $containers = docker ps -a -q --filter publish=8080
 
-          foreach ($cid in $containers) {
+          if (-not $containers) {
 
-            Write-Host "Removing container using 8080: $cid"
+            Write-Host "No containers using port 8080"
 
-            docker stop $cid *> $null
-            docker rm -f $cid *> $null
+          }
+          else {
+
+            foreach ($cid in $containers) {
+
+              Write-Host "Removing container using 8080: $cid"
+
+              try {
+                docker stop $cid
+              }
+              catch {
+                Write-Host "Could not stop container $cid"
+              }
+
+              try {
+                docker rm -f $cid
+              }
+              catch {
+                Write-Host "Could not remove container $cid"
+              }
+            }
           }
 
           Start-Sleep -Seconds 3
