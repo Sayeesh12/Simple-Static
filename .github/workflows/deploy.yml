@@ -53,21 +53,31 @@ jobs:
 
           Write-Host "Docker image built successfully"
 
-      - name: Stop old container
+      - name: Stop and remove old deployment container
         shell: powershell
         run: |
-          docker stop safe-deploy-app 2>$null
           docker rm -f safe-deploy-app 2>$null
 
-      - name: Remove containers using port 8080
+          Start-Sleep -Seconds 2
+
+      - name: Free port 8080
         shell: powershell
         run: |
-          $containers = docker ps -q --filter publish=8080
+          $containers = docker ps -a -q --filter publish=8080
 
           foreach ($cid in $containers) {
-            docker stop $cid
-            docker rm -f $cid
+            Write-Host "Removing container using port 8080: $cid"
+
+            docker stop $cid 2>$null
+            docker rm -f $cid 2>$null
           }
+
+          Start-Sleep -Seconds 3
+
+      - name: Remove exited containers
+        shell: powershell
+        run: |
+          docker container prune -f
 
       - name: Deploy new container
         shell: powershell
@@ -78,6 +88,7 @@ jobs:
             safe-deploy:${{ steps.meta.outputs.deployment_id }}
 
           if ($LASTEXITCODE -ne 0) {
+            docker ps -a
             throw "Docker container deployment failed"
           }
 
@@ -89,10 +100,16 @@ jobs:
         shell: powershell
         run: |
           try {
-              Invoke-WebRequest -Uri "http://localhost:8080" -UseBasicParsing
+              $response = Invoke-WebRequest `
+                -Uri "http://localhost:8080" `
+                -UseBasicParsing `
+                -TimeoutSec 15
+
               Write-Host "Deployment verification successful"
+              Write-Host "HTTP Status: $($response.StatusCode)"
           }
           catch {
+              docker logs safe-deploy-app
               throw "Deployment verification failed"
           }
 
@@ -110,7 +127,8 @@ jobs:
             logs = @(
               "Checkout complete",
               "Docker build succeeded",
-              "Container deployed successfully"
+              "Container deployed successfully",
+              "Verification successful"
             )
             message = "Deployment completed successfully"
           } | ConvertTo-Json -Depth 3
